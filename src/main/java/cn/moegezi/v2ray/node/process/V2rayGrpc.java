@@ -3,14 +3,23 @@ package cn.moegezi.v2ray.node.process;
 import cn.moegezi.v2ray.node.model.UserModel;
 import cn.moegezi.v2ray.node.model.UserTrafficLog;
 import cn.moegezi.v2ray.node.utils.ConfigUtil;
+import com.google.protobuf.ByteString;
+import com.v2ray.core.InboundHandlerConfig;
+import com.v2ray.core.app.proxyman.ReceiverConfig;
 import com.v2ray.core.app.proxyman.command.*;
 import com.v2ray.core.app.stats.command.GetStatsRequest;
 import com.v2ray.core.app.stats.command.GetStatsResponse;
 import com.v2ray.core.app.stats.command.StatsServiceGrpc;
+import com.v2ray.core.common.net.IPOrDomain;
+import com.v2ray.core.common.net.Network;
+import com.v2ray.core.common.net.PortRange;
 import com.v2ray.core.common.protocol.SecurityConfig;
 import com.v2ray.core.common.protocol.SecurityType;
 import com.v2ray.core.common.protocol.User;
 import com.v2ray.core.common.serial.TypedMessage;
+import com.v2ray.core.proxy.shadowsocks.Account;
+import com.v2ray.core.proxy.shadowsocks.CipherType;
+import com.v2ray.core.proxy.shadowsocks.ServerConfig;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
@@ -29,6 +38,8 @@ public class V2rayGrpc {
     private final String security = ConfigUtil.getString("v2ray.security");
     private final Integer alterId = ConfigUtil.getInteger("v2ray.alter-id");
     private final Integer level = ConfigUtil.getInteger("v2ray.level");
+    private final String address = ConfigUtil.getString("v2ray.grpc.address");
+    private final Integer port = ConfigUtil.getInteger("v2ray.grpc.port");
 
     private static final String UplinkFormat = "user>>>%s>>>traffic>>>uplink";
     private static final String DownlinkFormat = "user>>>%s>>>traffic>>>downlink";
@@ -36,8 +47,6 @@ public class V2rayGrpc {
     private static V2rayGrpc instance;
 
     private ManagedChannel channel;
-    private HandlerServiceGrpc.HandlerServiceBlockingStub handlerService;
-    private StatsServiceGrpc.StatsServiceBlockingStub statsService;
 
     private List<UserModel> users = new ArrayList<>();
 
@@ -47,16 +56,13 @@ public class V2rayGrpc {
 
     public void start() {
         if (channel != null && !channel.isShutdown()) stop();
-        channel = ManagedChannelBuilder.forAddress("127.0.0.1", 10086).usePlaintext().build();
-        handlerService = HandlerServiceGrpc.newBlockingStub(channel);
-        statsService = StatsServiceGrpc.newBlockingStub(channel);
+        channel = ManagedChannelBuilder.forAddress(address, port).usePlaintext().build();
     }
 
     public void stop() {
         try {
             channel.shutdown().awaitTermination(5, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            e.printStackTrace();
+        } catch (InterruptedException ignored) {
         }
     }
 
@@ -102,9 +108,14 @@ public class V2rayGrpc {
             }
         }
         users.addAll(add);
+        if (add.size() > 0 || remove.size() > 0) {
+            logger.info("更新用户: ADD " + add.size() + " REMOVE " + remove.size());
+        }
     }
 
+    // 添加用户
     private void addUser(UserModel userModel) {
+        HandlerServiceGrpc.HandlerServiceBlockingStub handlerService = HandlerServiceGrpc.newBlockingStub(channel);
         AlterInboundRequest req = AlterInboundRequest
                 .newBuilder()
                 .setTag(v2rayTag)
@@ -138,13 +149,14 @@ public class V2rayGrpc {
                 .build();
         try {
             handlerService.alterInbound(req);
-            logger.info("添加用户: USER " + userModel.getEmail());
         } catch (StatusRuntimeException e) {
             logger.error("添加用户失败" + e);
         }
     }
 
+    // 删除用户
     private void removeUser(String email) {
+        HandlerServiceGrpc.HandlerServiceBlockingStub handlerService = HandlerServiceGrpc.newBlockingStub(channel);
         AlterInboundRequest req = AlterInboundRequest
                 .newBuilder()
                 .setTag(v2rayTag)
@@ -160,13 +172,71 @@ public class V2rayGrpc {
                 .build();
         try {
             handlerService.alterInbound(req);
-            logger.info("删除用户: USER " + email);
         } catch (StatusRuntimeException e) {
             logger.error("删除用户失败", e);
         }
     }
 
+    public void addSsUser() {
+        HandlerServiceGrpc.HandlerServiceBlockingStub handlerService = HandlerServiceGrpc.newBlockingStub(channel);
+        AddInboundRequest req = AddInboundRequest
+                .newBuilder()
+                .setInbound(InboundHandlerConfig
+                        .newBuilder()
+                        .setTag("SSTag")
+                        .setReceiverSettings(TypedMessage
+                                .newBuilder()
+                                .setType(ReceiverConfig.getDescriptor().getFullName())
+                                .setValue(ReceiverConfig
+                                        .newBuilder()
+                                        .setPortRange(PortRange
+                                                .newBuilder()
+                                                .setFrom(10088)
+                                                .setTo(10088)
+                                                .build())
+                                        .setListen(IPOrDomain
+                                                .newBuilder()
+                                                .setIp(ByteString.copyFrom(new byte[]{0, 0, 0, 0}))
+                                                .build())
+                                        .build()
+                                        .toByteString())
+                                .build())
+                        .setProxySettings(TypedMessage
+                                .newBuilder()
+                                .setType(ServerConfig.getDescriptor().getFullName())
+                                .setValue(ServerConfig
+                                        .newBuilder()
+                                        .setUser(User
+                                                .newBuilder()
+                                                .setAccount(TypedMessage
+                                                        .newBuilder()
+                                                        .setType(com.v2ray.core.proxy.shadowsocks.Account.getDescriptor().getFullName())
+                                                        .setValue(com.v2ray.core.proxy.shadowsocks.Account
+                                                                .newBuilder()
+                                                                .setPassword("password")
+                                                                .setCipherType(CipherType.CHACHA20)
+                                                                .setOta(Account.OneTimeAuth.Auto)
+                                                                .build()
+                                                                .toByteString())
+                                                        .build())
+                                                .setLevel(1)
+                                                .build())
+                                        .addNetwork(Network.TCP)
+                                        .build()
+                                        .toByteString())
+                                .build())
+                        .build())
+                .build();
+        try {
+            handlerService.addInbound(req);
+        } catch (StatusRuntimeException e) {
+            logger.error("添加SS用户失败", e);
+        }
+    }
+
+    // 获得用户流量
     private long getTraffic(String email, String fmt) {
+        StatsServiceGrpc.StatsServiceBlockingStub statsService = StatsServiceGrpc.newBlockingStub(channel);
         email = String.format(fmt, email);
         GetStatsRequest req = GetStatsRequest
                 .newBuilder()
